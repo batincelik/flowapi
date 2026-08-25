@@ -1,0 +1,84 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: flowapi
+      POSTGRES_PASSWORD: flowapi
+      POSTGRES_DB: flowapi
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowapi"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    ports: ["15432:5432"]
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["16379:6379"]
+  migrate:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    ports: ["${API_PORT:-8000}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  worker:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    command: ["python", "-m", "flowapi.worker"]
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  dispatcher:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    command: ["python", "-m", "flowapi.dispatcher"]
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  scheduler:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    command: ["python", "-m", "flowapi.scheduler"]
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+  dashboard:
+    build: {context: ., dockerfile: apps/dashboard/Dockerfile}
+    environment:
+      FLOWAPI_API_ORIGIN: http://api:8000
+    ports: ["${DASHBOARD_PORT:-3000}:3000"]
+    depends_on: [api]
+volumes:
+  postgres_data:

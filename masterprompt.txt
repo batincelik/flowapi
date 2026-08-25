@@ -1,0 +1,4447 @@
+# FlowAPI — Self-Hosted Visual Workflow Automation Engine
+
+You are a senior distributed systems engineer, backend architect, full-stack engineer, workflow-engine engineer, and DevOps engineer.
+
+Your task is to build a production-quality open-source application called **FlowAPI**.
+
+FlowAPI is a self-hosted visual workflow automation platform that allows users to design event-driven workflows using nodes and connections.
+
+Conceptually, FlowAPI is inspired by products such as:
+
+* n8n
+* Zapier
+* Make
+* Temporal concepts
+* Node-RED
+
+Do not copy their branding, UI, APIs, or source code.
+
+FlowAPI must provide its own developer experience and architecture.
+
+This must NOT become:
+
+* a React Flow demo
+* a frontend-only node editor
+* a collection of fake draggable cards
+* a CRUD project
+* a simple sequential script runner
+* an unsafe arbitrary-code execution platform
+
+The core engineering challenge is building a reliable workflow execution engine.
+
+---
+
+# 1. Product Vision
+
+A user should be able to visually build workflows such as:
+
+```text
+Webhook
+   ↓
+HTTP Request
+   ↓
+Condition
+   ├── TRUE → PostgreSQL Query
+   │             ↓
+   │          Discord
+   │
+   └── FALSE → Stop
+```
+
+Another example:
+
+```text
+Schedule
+   ↓
+HTTP Request
+   ↓
+Transform Data
+   ↓
+Loop Items
+   ↓
+Webhook
+```
+
+Another:
+
+```text
+Webhook
+   ↓
+Validate Payload
+   ↓
+Condition
+   ├── Payment successful
+   │       ↓
+   │   Send Email
+   │
+   └── Failed
+           ↓
+        Discord Alert
+```
+
+FlowAPI should allow users to:
+
+* create workflows
+* add nodes visually
+* connect nodes
+* configure nodes
+* validate workflows
+* enable/disable workflows
+* trigger via webhook
+* trigger manually
+* trigger via schedule
+* execute asynchronously
+* inspect every execution
+* inspect every node execution
+* retry failed executions
+* retry individual failed nodes where safe
+* view input/output data
+* use expressions and variables
+* reference outputs of earlier nodes
+* manage secrets
+* handle branches
+* handle retries
+* set timeouts
+* use conditional logic
+* process collections
+* receive real-time execution updates
+* inspect logs
+* preserve immutable workflow versions
+
+Primary philosophy:
+
+```text
+Design visually.
+Execute reliably.
+Understand every step.
+```
+
+---
+
+# 2. Primary Tech Stack
+
+## Frontend
+
+* Next.js
+* React
+* TypeScript
+* App Router
+* Tailwind CSS
+* shadcn/ui where useful
+* React Flow
+* TanStack Query
+* TanStack Table
+* Recharts where useful
+
+## Backend
+
+* Python
+* FastAPI
+* Pydantic v2
+* SQLAlchemy 2
+* Alembic
+
+## Database
+
+* PostgreSQL
+
+## Queue / Coordination
+
+* Redis
+
+## Worker
+
+* Python
+
+## Infrastructure
+
+* Docker
+* Docker Compose
+
+## Testing
+
+Backend:
+
+* pytest
+* pytest-asyncio
+
+Frontend:
+
+* Vitest
+* React Testing Library
+
+E2E:
+
+* Playwright
+
+## Code Quality
+
+Python:
+
+* Ruff
+* mypy
+
+TypeScript:
+
+* ESLint
+* Prettier
+
+---
+
+# 3. Repository Structure
+
+Use a monorepo.
+
+Recommended:
+
+```text
+flowapi/
+├── apps/
+│   ├── api/
+│   ├── dashboard/
+│   ├── worker/
+│   └── scheduler/
+│
+├── packages/
+│   ├── workflow-core/
+│   ├── node-sdk/
+│   ├── expression-engine/
+│   └── shared/
+│
+├── nodes/
+│   ├── core/
+│   ├── http/
+│   ├── database/
+│   └── notifications/
+│
+├── docs/
+│
+├── examples/
+│
+├── scripts/
+│
+├── infrastructure/
+│
+├── .github/
+│   └── workflows/
+│
+├── docker-compose.yml
+├── Makefile
+├── .env.example
+├── README.md
+└── LICENSE
+```
+
+You may improve the structure when technically justified.
+
+Do not introduce unnecessary microservices.
+
+---
+
+# 4. Core Concepts
+
+FlowAPI should model:
+
+```text
+User
+Project
+Workflow
+Workflow Version
+Node
+Connection
+Trigger
+Execution
+Node Execution
+Credential
+Secret
+Webhook
+Schedule
+Worker
+Audit Event
+```
+
+---
+
+# 5. Workflow Model
+
+A workflow contains:
+
+```text
+id
+project_id
+
+name
+slug
+description
+
+status
+
+active_version_id
+draft_version_id
+
+created_at
+updated_at
+archived_at
+```
+
+Workflow status:
+
+```text
+draft
+active
+disabled
+archived
+```
+
+---
+
+# 6. Immutable Workflow Versions
+
+This is critical.
+
+Do not let an execution depend on a workflow graph that changes halfway through execution.
+
+Every publish operation should create an immutable:
+
+```text
+workflow_version
+```
+
+Fields:
+
+```text
+id
+workflow_id
+version_number
+
+graph_definition
+created_at
+created_by
+published_at
+```
+
+Execution references:
+
+```text
+workflow_version_id
+```
+
+Never silently mutate previously published versions.
+
+---
+
+# 7. Draft vs Published
+
+Users edit:
+
+```text
+draft
+```
+
+Published/active workflows execute:
+
+```text
+published immutable version
+```
+
+Flow:
+
+```text
+Edit Draft
+   ↓
+Validate
+   ↓
+Publish
+   ↓
+Create Workflow Version
+   ↓
+Set Active Version
+```
+
+Editing draft must not change running production executions.
+
+---
+
+# 8. Workflow Graph
+
+A graph consists of:
+
+```text
+nodes
+edges
+```
+
+Node:
+
+```text
+id
+type
+position
+configuration
+```
+
+Edge:
+
+```text
+id
+source_node_id
+source_handle
+target_node_id
+target_handle
+```
+
+Do not mix editor-only UI state with runtime business state unnecessarily.
+
+---
+
+# 9. DAG Validation
+
+Normal workflows should form a Directed Acyclic Graph unless special looping nodes explicitly support controlled iteration.
+
+Validate:
+
+* missing source
+* missing target
+* duplicate edges
+* invalid handles
+* unreachable nodes
+* cycles
+* multiple trigger nodes if unsupported
+* missing trigger
+* required configuration
+* unsupported node type
+
+Do not allow accidental infinite cycles.
+
+---
+
+# 10. Workflow Validation
+
+Provide:
+
+```text
+POST /api/v1/workflows/{id}/validate
+```
+
+Return structured problems.
+
+Example:
+
+```json
+{
+  "valid": false,
+  "errors": [
+    {
+      "code": "MISSING_REQUIRED_FIELD",
+      "node_id": "node_4",
+      "field": "url",
+      "message": "HTTP Request URL is required."
+    }
+  ]
+}
+```
+
+---
+
+# 11. Node Registry
+
+Create a central node registry.
+
+Each node type should define:
+
+```text
+type
+display_name
+category
+input_schema
+output_schema
+config_schema
+executor
+retry_policy
+timeout_policy
+```
+
+Do not scatter `if node.type == ...` everywhere.
+
+Use registry/plugin architecture.
+
+---
+
+# 12. Initial Node Categories
+
+Create:
+
+```text
+Triggers
+Logic
+Data
+HTTP
+Database
+Notifications
+Flow Control
+```
+
+---
+
+# 13. Initial Trigger Nodes
+
+Implement:
+
+```text
+Manual Trigger
+Webhook Trigger
+Schedule Trigger
+```
+
+Optional later:
+
+```text
+API Trigger
+```
+
+---
+
+# 14. Manual Trigger
+
+Useful for development/testing.
+
+Click:
+
+```text
+Run Workflow
+```
+
+This should create a real execution job.
+
+Do not run the workflow inside FastAPI request.
+
+---
+
+# 15. Webhook Trigger
+
+Each webhook workflow receives a unique endpoint.
+
+Example:
+
+```text
+POST /hooks/{webhook_id}
+```
+
+Webhook may support:
+
+```text
+GET
+POST
+PUT
+PATCH
+DELETE
+```
+
+depending on configuration.
+
+Initial default:
+
+```text
+POST
+```
+
+---
+
+# 16. Webhook Security
+
+Support optional:
+
+```text
+secret header
+Bearer token
+HMAC signature
+```
+
+Do not expose webhook secrets publicly.
+
+Allow unauthenticated webhook only if user explicitly configures it.
+
+---
+
+# 17. Webhook Payload
+
+Webhook input should expose:
+
+```text
+body
+headers
+query
+method
+path parameters if applicable
+```
+
+Do not automatically store dangerous huge bodies.
+
+Apply request size limits.
+
+---
+
+# 18. Webhook Response Modes
+
+Support:
+
+```text
+immediate
+wait_for_workflow
+```
+
+Default:
+
+```text
+immediate
+```
+
+Example immediate response:
+
+```json
+{
+  "execution_id": "exec_xxx",
+  "status": "queued"
+}
+```
+
+`wait_for_workflow` must have strict timeout.
+
+Do not keep HTTP connections open indefinitely.
+
+---
+
+# 19. Schedule Trigger
+
+Support cron schedules.
+
+Fields:
+
+```text
+cron
+timezone
+enabled
+```
+
+Use UTC internally.
+
+Example:
+
+```text
+0 */6 * * *
+```
+
+Store:
+
+```text
+last_run_at
+next_run_at
+```
+
+---
+
+# 20. Distributed Scheduler
+
+Multiple scheduler instances must not create duplicate scheduled executions.
+
+Use safe DB locking.
+
+Example:
+
+```text
+SELECT ... FOR UPDATE SKIP LOCKED
+```
+
+Create one execution per scheduled occurrence.
+
+Use deterministic occurrence identifiers where useful.
+
+---
+
+# 21. HTTP Request Node
+
+This should be production-grade.
+
+Support:
+
+```text
+GET
+POST
+PUT
+PATCH
+DELETE
+HEAD
+```
+
+Configuration:
+
+```text
+URL
+headers
+query parameters
+body
+timeout
+follow redirects
+authentication
+```
+
+Response:
+
+```text
+status
+headers
+body
+duration
+```
+
+Set maximum response size.
+
+---
+
+# 22. HTTP SSRF Protection
+
+THIS IS CRITICAL.
+
+HTTP Request nodes can make arbitrary network requests.
+
+By default, block:
+
+```text
+localhost
+127.0.0.0/8
+::1
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+169.254.0.0/16
+fc00::/7
+fe80::/10
+cloud metadata endpoints
+```
+
+unless an administrator explicitly enables private network access.
+
+Validate redirect destinations too.
+
+Resolve DNS safely.
+
+Do not trust only hostname strings.
+
+---
+
+# 23. HTTP Authentication
+
+Support credential references.
+
+Initial:
+
+```text
+Bearer Token
+Basic Auth
+API Key Header
+```
+
+Never embed plaintext credentials directly into immutable workflow JSON if avoidable.
+
+Reference credential IDs.
+
+---
+
+# 24. Condition Node
+
+Allow branching based on expressions.
+
+Example:
+
+```text
+{{$nodes.http.status}} >= 200
+AND
+{{$nodes.http.status}} < 300
+```
+
+Outputs:
+
+```text
+true
+false
+```
+
+Do not use Python `eval()`.
+
+Build a restricted expression engine.
+
+---
+
+# 25. Expression Engine
+
+This is a major component.
+
+Support references such as:
+
+```text
+{{$input.body.email}}
+{{$trigger.body.order_id}}
+{{$nodes.fetch_user.body.name}}
+{{$env.SOME_VALUE}}
+```
+
+Expressions must NOT allow arbitrary code execution.
+
+Do not use:
+
+```python
+eval()
+exec()
+```
+
+or unsafe JavaScript evaluation.
+
+Create a restricted parser/evaluator.
+
+---
+
+# 26. Expression Features
+
+Support basic:
+
+```text
+property access
+array access
+comparisons
+boolean operators
+basic arithmetic
+null coalescing
+safe string interpolation
+```
+
+Example:
+
+```text
+https://api.example.com/users/{{$trigger.body.user_id}}
+```
+
+---
+
+# 27. Expression Scope
+
+Expose only controlled objects:
+
+```text
+trigger
+input
+nodes
+execution
+variables
+```
+
+Secrets should not automatically appear inside general expression scope.
+
+Credential fields are resolved only for nodes that explicitly reference them.
+
+---
+
+# 28. Expression Errors
+
+Return clear errors:
+
+```text
+EXPRESSION_PARSE_ERROR
+UNKNOWN_NODE_REFERENCE
+UNKNOWN_PROPERTY
+TYPE_MISMATCH
+```
+
+Include node ID.
+
+Do not expose internal stack traces.
+
+---
+
+# 29. Transform Node
+
+Provide safe structured transformation.
+
+Examples:
+
+```text
+set field
+rename field
+remove field
+construct object
+map selected fields
+```
+
+Do not require arbitrary scripting.
+
+---
+
+# 30. Set Node
+
+Simple useful node:
+
+Input:
+
+```json
+{
+  "name": "John"
+}
+```
+
+Configuration:
+
+```text
+full_name = {{$input.name}}
+source = flowapi
+```
+
+Output:
+
+```json
+{
+  "full_name": "John",
+  "source": "flowapi"
+}
+```
+
+---
+
+# 31. Merge Node
+
+Support merging outputs from branches.
+
+Define behavior explicitly:
+
+```text
+wait_for_all
+first_available
+```
+
+Default:
+
+```text
+wait_for_all
+```
+
+Avoid ambiguous execution.
+
+---
+
+# 32. Loop / For Each Node
+
+Support controlled collection iteration.
+
+Example input:
+
+```json
+{
+  "items": [
+    {"id":1},
+    {"id":2}
+  ]
+}
+```
+
+Loop should execute downstream branch per item.
+
+Apply:
+
+```text
+max items
+max concurrency
+```
+
+Prevent accidental execution explosions.
+
+---
+
+# 33. Loop Safety
+
+Configure:
+
+```text
+MAX_LOOP_ITEMS
+```
+
+Example default:
+
+```text
+1000
+```
+
+Do not allow unbounded input collection.
+
+---
+
+# 34. Delay Node
+
+Allow execution pause:
+
+```text
+delay 30 seconds
+```
+
+Do NOT implement using:
+
+```python
+await asyncio.sleep(86400)
+```
+
+for long waits.
+
+Persist delayed execution state and reschedule through queue/scheduler.
+
+---
+
+# 35. Stop Node
+
+Allow explicitly ending a branch/workflow.
+
+Support result status:
+
+```text
+completed
+stopped
+```
+
+---
+
+# 36. PostgreSQL Node
+
+Support database execution carefully.
+
+A credential references external DB.
+
+Initial:
+
+```text
+PostgreSQL
+```
+
+Operations:
+
+```text
+SELECT
+INSERT
+UPDATE
+```
+
+Parameterized queries only.
+
+Do not concatenate expressions directly into SQL.
+
+---
+
+# 37. SQL Security
+
+Configuration:
+
+```text
+query
+parameters
+```
+
+Example:
+
+```sql
+SELECT *
+FROM users
+WHERE id = :user_id
+```
+
+Parameters:
+
+```text
+user_id = {{$trigger.body.user_id}}
+```
+
+Never encourage:
+
+```text
+"SELECT ... " + user_input
+```
+
+---
+
+# 38. Database Credential Isolation
+
+External DB credentials are encrypted.
+
+Do not expose values in workflow definitions or API responses.
+
+Set connection timeouts.
+
+Bound query duration.
+
+---
+
+# 39. Discord Node
+
+Support Discord webhook notifications.
+
+Fields:
+
+```text
+credential
+message
+```
+
+Use real webhook calls.
+
+Set timeout/retries.
+
+Do not require Discord for basic FlowAPI operation.
+
+---
+
+# 40. Generic Webhook Action
+
+Send outbound webhook.
+
+Support:
+
+```text
+URL
+method
+headers
+body
+authentication
+timeout
+```
+
+Apply same SSRF protections as HTTP Request node.
+
+---
+
+# 41. Execution Model
+
+A workflow execution represents one run.
+
+Fields:
+
+```text
+id
+workflow_id
+workflow_version_id
+
+trigger_type
+trigger_data
+
+status
+
+started_at
+finished_at
+
+worker_id
+
+error_code
+error_message
+
+created_at
+```
+
+---
+
+# 42. Execution Statuses
+
+Use:
+
+```text
+queued
+running
+waiting
+completed
+failed
+cancelled
+```
+
+Optionally:
+
+```text
+partially_completed
+```
+
+only if semantics are well defined.
+
+---
+
+# 43. Node Execution
+
+Every executed node creates durable record.
+
+Fields:
+
+```text
+id
+execution_id
+node_id
+node_type
+
+status
+
+attempt
+
+input_data
+output_data
+
+started_at
+finished_at
+duration_ms
+
+error_code
+error_message
+
+worker_id
+```
+
+---
+
+# 44. Node Execution States
+
+Use:
+
+```text
+pending
+ready
+running
+waiting
+completed
+failed
+skipped
+cancelled
+```
+
+---
+
+# 45. Execution Planning
+
+When execution begins:
+
+1. Load immutable workflow version.
+2. Validate graph.
+3. Build runtime execution plan.
+4. Determine ready nodes.
+5. Queue node work.
+6. Persist progress.
+
+Do not keep entire workflow state only in worker memory.
+
+---
+
+# 46. Durable Execution State
+
+Worker crashes must not lose workflow progress.
+
+PostgreSQL remains source of truth.
+
+Redis is transient queue/coordination.
+
+After restart, FlowAPI should determine:
+
+```text
+which nodes completed
+which nodes failed
+which nodes are ready
+which nodes were running on dead workers
+```
+
+---
+
+# 47. At-Least-Once Execution
+
+Background jobs may execute more than once after worker failure.
+
+Do not claim exactly-once node execution.
+
+Nodes with side effects need careful semantics.
+
+Document:
+
+```text
+at-least-once execution
+```
+
+Provide idempotency support where practical.
+
+---
+
+# 48. Node Idempotency
+
+Each node execution receives:
+
+```text
+execution_id
+node_id
+attempt
+```
+
+HTTP node may optionally support idempotency header derived from execution.
+
+Example:
+
+```text
+X-FlowAPI-Execution-ID
+```
+
+But do not assume external systems honor it.
+
+Document responsibility.
+
+---
+
+# 49. Workflow Execution Queue
+
+Use Redis for runnable work.
+
+Do not execute full workflows inside API handlers.
+
+Architecture:
+
+```text
+Trigger
+  ↓
+FastAPI
+  ↓
+PostgreSQL Execution
+  ↓
+Redis
+  ↓
+Worker
+  ↓
+Node Executor
+  ↓
+PostgreSQL
+```
+
+---
+
+# 50. Worker Concurrency
+
+Configurable:
+
+```text
+FLOWAPI_WORKER_CONCURRENCY=8
+```
+
+Different node types may require different resource characteristics.
+
+Keep v1 simple.
+
+---
+
+# 51. Worker Heartbeat
+
+Workers store:
+
+```text
+worker_id
+hostname
+status
+last_seen_at
+active_node_executions
+started_at
+```
+
+---
+
+# 52. Worker Crash Recovery
+
+If a node remains:
+
+```text
+running
+```
+
+on a worker whose lease expired:
+
+determine whether to:
+
+```text
+retry
+fail
+recover
+```
+
+according to node policy.
+
+Never leave indefinitely running.
+
+---
+
+# 53. Node Timeout
+
+Every node supports timeout.
+
+Example:
+
+```text
+30 seconds
+```
+
+Long-running requests must be bounded.
+
+Node-specific maximums should be configurable.
+
+---
+
+# 54. Retry Policy
+
+Node configuration may support:
+
+```text
+max_attempts
+retry_strategy
+retry_delay
+```
+
+Strategies:
+
+```text
+fixed
+exponential
+```
+
+Optional jitter.
+
+---
+
+# 55. Retry Classification
+
+Do not retry every failure.
+
+Retry transient examples:
+
+```text
+network timeout
+HTTP 429
+HTTP 502
+HTTP 503
+temporary connection error
+```
+
+Do not normally retry:
+
+```text
+invalid expression
+invalid SQL
+missing required input
+authentication configuration error
+```
+
+---
+
+# 56. Retry History
+
+Every attempt must remain visible.
+
+Execution detail:
+
+```text
+HTTP Request
+Attempt 1 — HTTP 503
+Attempt 2 — timeout
+Attempt 3 — success
+```
+
+---
+
+# 57. Failure Propagation
+
+Define semantics.
+
+Default:
+
+if a node fails after retries:
+
+```text
+workflow execution fails
+```
+
+unless an explicit error branch exists.
+
+---
+
+# 58. Error Branch
+
+Allow nodes to optionally connect:
+
+```text
+success
+error
+```
+
+Example:
+
+```text
+HTTP Request
+   ├── success → Transform
+   └── error   → Discord Alert
+```
+
+If error branch exists:
+
+workflow may continue.
+
+Document result semantics.
+
+---
+
+# 59. Branch Execution
+
+Condition nodes may activate only matching branch.
+
+Nodes on non-selected branches should become:
+
+```text
+skipped
+```
+
+where appropriate.
+
+Do not leave them pending forever.
+
+---
+
+# 60. Join Semantics
+
+If multiple branches converge:
+
+determine if downstream node requires:
+
+```text
+all required predecessors
+or
+any predecessor
+```
+
+Make semantics explicit.
+
+Avoid accidental deadlocks.
+
+---
+
+# 61. Execution Context
+
+Each execution has controlled context.
+
+Example:
+
+```json
+{
+  "trigger": {},
+  "nodes": {},
+  "variables": {},
+  "execution": {}
+}
+```
+
+Do not create one mutable global dict shared unpredictably across parallel branches.
+
+---
+
+# 62. Node Output
+
+Each node output should be immutable after successful completion.
+
+If retried and succeeds, latest successful attempt becomes official node output.
+
+Historical attempts remain.
+
+---
+
+# 63. Output Size Limits
+
+Nodes may return huge data.
+
+Configure:
+
+```text
+MAX_NODE_OUTPUT_BYTES
+```
+
+Do not persist gigabyte JSON documents.
+
+Large binary payload support is future work.
+
+---
+
+# 64. Binary Data
+
+Do not base64 huge files into workflow execution JSON.
+
+For v1, focus on JSON/text data.
+
+Architecture may later support artifact storage.
+
+---
+
+# 65. Execution Data Retention
+
+Configure:
+
+```text
+successful executions: 30 days
+failed executions: 90 days
+```
+
+Example only.
+
+Make configurable.
+
+Do not delete active executions.
+
+---
+
+# 66. Sensitive Execution Data
+
+Node input/output can contain secrets or PII.
+
+Support field redaction.
+
+Credential values must never be serialized into node output.
+
+---
+
+# 67. Credential Model
+
+Credentials should contain:
+
+```text
+id
+project_id
+name
+type
+encrypted_data
+created_at
+updated_at
+```
+
+Types:
+
+```text
+bearer_token
+basic_auth
+api_key
+discord_webhook
+postgres
+custom_headers
+```
+
+---
+
+# 68. Encryption
+
+Use trusted authenticated encryption.
+
+Master key:
+
+```text
+FLOWAPI_ENCRYPTION_KEY
+```
+
+Never invent cryptography.
+
+If key is lost, encrypted credentials are unrecoverable.
+
+Document this.
+
+---
+
+# 69. Credential API
+
+Dashboard can:
+
+```text
+Create
+Edit
+Delete
+Test
+```
+
+Do not return raw credential values in normal API responses.
+
+---
+
+# 70. Credential Testing
+
+If a credential type supports validation:
+
+perform actual bounded test.
+
+Examples:
+
+```text
+PostgreSQL connection
+Discord webhook
+```
+
+Do not fake success.
+
+---
+
+# 71. Expression Secret Safety
+
+Expressions must not allow:
+
+```text
+{{$credentials.discord.password}}
+```
+
+arbitrary credential enumeration.
+
+Nodes should explicitly receive credential references.
+
+---
+
+# 72. Project Variables
+
+Support non-secret project variables.
+
+Example:
+
+```text
+API_BASE_URL
+ENVIRONMENT
+```
+
+Expression:
+
+```text
+{{$variables.API_BASE_URL}}
+```
+
+Secrets belong in credential system instead.
+
+---
+
+# 73. Environment Variables
+
+System environment variables should NOT automatically be exposed to workflows.
+
+Do not allow workflows to read:
+
+```text
+DATABASE_URL
+FLOWAPI_ENCRYPTION_KEY
+```
+
+through generic expression syntax.
+
+Only explicitly configured safe workflow variables.
+
+---
+
+# 74. Workflow Input Schema
+
+Optional workflow-level input schema.
+
+Example:
+
+```json
+{
+  "order_id": "string",
+  "email": "string"
+}
+```
+
+Manual/webhook triggers validate input where configured.
+
+Use JSON Schema or equivalent Pydantic validation strategy.
+
+---
+
+# 75. Node Input Schema
+
+Node registry should expose configuration schemas.
+
+Frontend can render forms based on these where useful.
+
+Do not make the entire UI generic-schema-driven if it harms UX.
+
+Core nodes may have custom configuration interfaces.
+
+---
+
+# 76. Execution History
+
+Main table:
+
+```text
+Execution
+Workflow
+Trigger
+Status
+Duration
+Started
+```
+
+Filters:
+
+```text
+workflow
+status
+trigger
+date
+```
+
+Use server-side pagination.
+
+---
+
+# 77. Execution Detail
+
+Show workflow graph with execution overlay.
+
+Node colors/statuses:
+
+```text
+Pending
+Running
+Completed
+Failed
+Skipped
+```
+
+Do not make entire graph aggressively colored.
+
+---
+
+# 78. Execution Timeline
+
+Example:
+
+```text
+12:01:01 Webhook received
+12:01:01 Execution queued
+12:01:02 HTTP Request started
+12:01:03 HTTP Request completed
+12:01:03 Condition evaluated true
+12:01:04 PostgreSQL node completed
+12:01:04 Discord node started
+12:01:05 Execution completed
+```
+
+Use real timestamps.
+
+---
+
+# 79. Node Detail Panel
+
+Click executed node.
+
+Show:
+
+```text
+Input
+Output
+Attempts
+Error
+Duration
+Configuration snapshot
+```
+
+Secrets must remain redacted.
+
+---
+
+# 80. Retry Execution
+
+Allow:
+
+```text
+Retry Execution
+```
+
+Create a new execution linked to:
+
+```text
+retry_of_execution_id
+```
+
+Do not erase failed execution history.
+
+---
+
+# 81. Retry From Failed Node
+
+Advanced feature.
+
+Where safe, allow restarting from failure using successful upstream outputs.
+
+This must use the SAME immutable workflow version.
+
+Do not apply latest edited workflow silently.
+
+If difficult, prioritize whole-execution retry first.
+
+---
+
+# 82. Execution Cancellation
+
+Allow cancelling:
+
+```text
+queued
+running
+waiting
+```
+
+Cancellation is cooperative.
+
+Set:
+
+```text
+cancellation_requested
+```
+
+Workers stop scheduling future nodes.
+
+Interrupt external operations where safely possible.
+
+Do not falsely claim every running network request stops instantly.
+
+---
+
+# 83. Execution Logs
+
+Store structured execution events separately from node input/output.
+
+Examples:
+
+```text
+execution.created
+node.started
+node.retrying
+node.completed
+node.failed
+execution.completed
+```
+
+---
+
+# 84. Live Execution Updates
+
+Use:
+
+```text
+SSE
+```
+
+or WebSockets.
+
+Prefer SSE if sufficient.
+
+Dashboard should update running nodes without aggressive polling.
+
+---
+
+# 85. Workflow Editor
+
+Use React Flow.
+
+Features:
+
+```text
+node library sidebar
+drag/drop
+connect nodes
+zoom
+pan
+minimap optional
+fit view
+delete
+duplicate
+undo/redo
+```
+
+Do not prioritize fancy animations over usability.
+
+---
+
+# 86. Node Library
+
+Categories:
+
+```text
+Triggers
+Flow
+HTTP
+Data
+Database
+Notifications
+```
+
+Search should be available.
+
+---
+
+# 87. Node Configuration Panel
+
+Selecting node opens side panel.
+
+Fields depend on node type.
+
+Examples:
+
+HTTP:
+
+```text
+Method
+URL
+Headers
+Authentication
+Body
+Timeout
+Retry
+```
+
+Condition:
+
+```text
+Left value
+Operator
+Right value
+```
+
+---
+
+# 88. Expression Editor
+
+Configuration fields that support expressions should clearly indicate it.
+
+Provide autocomplete suggestions:
+
+```text
+$trigger
+$input
+$nodes
+$variables
+```
+
+Do not execute expression code in browser to determine runtime output.
+
+Preview evaluation may use safe backend evaluator or isolated shared parser.
+
+---
+
+# 89. Data Picker
+
+When previous node output examples exist:
+
+allow selecting fields.
+
+Example:
+
+```text
+HTTP Request
+└── body
+    └── user
+        └── email
+```
+
+Then insert:
+
+```text
+{{$nodes.http.body.user.email}}
+```
+
+---
+
+# 90. Workflow Test Mode
+
+Draft workflows should be manually testable.
+
+Test execution references a draft snapshot/version.
+
+Create immutable temporary execution definition.
+
+Do not let graph changes during test mutate current run.
+
+---
+
+# 91. Test Data
+
+Allow trigger test payload.
+
+Example:
+
+```json
+{
+  "order_id": "123",
+  "email": "user@example.com"
+}
+```
+
+Do not use hardcoded fake execution outputs.
+
+---
+
+# 92. Execution Replay
+
+Provide:
+
+```text
+Replay Trigger Data
+```
+
+This creates a NEW execution using stored trigger input.
+
+If trigger payload contains sensitive data, respect retention/redaction settings.
+
+---
+
+# 93. Workflow Publishing
+
+Publish should validate:
+
+* graph
+* nodes
+* expressions
+* credentials exist
+* schedule valid
+* webhook config
+* prerequisite configuration
+
+Invalid draft cannot become active.
+
+---
+
+# 94. Publish Atomicity
+
+Publishing workflow and switching active version must use a safe DB transaction.
+
+Do not create active version partially.
+
+---
+
+# 95. Workflow Rollback
+
+Allow switching active version to earlier published graph.
+
+Create new version or explicit active-version transition with audit history.
+
+Prefer:
+
+```text
+restore v7
+→ create v12 based on v7
+```
+
+Preserve immutable history.
+
+---
+
+# 96. Workflow Diff
+
+Version history should show:
+
+```text
+node added
+node removed
+node config changed
+edge added
+edge removed
+```
+
+Do not show fake text.
+
+Compute actual graph difference.
+
+---
+
+# 97. Workflow Duplication
+
+Support:
+
+```text
+Duplicate Workflow
+```
+
+Credentials should remain references only if same project permissions allow.
+
+---
+
+# 98. Workflow Import/Export
+
+Support JSON export.
+
+Export:
+
+```text
+workflow graph
+node configurations
+metadata
+```
+
+Never export credential plaintext.
+
+Credential references should be removed or mapped to placeholder identifiers.
+
+Import requires validation.
+
+---
+
+# 99. Node Plugin Architecture
+
+Create extension API.
+
+Conceptually:
+
+```python
+class FlowNode:
+    type: str
+    config_model: type[BaseModel]
+
+    async def execute(self, context, config):
+        ...
+```
+
+Do not require editing central executor logic for every new node.
+
+---
+
+# 100. Node Metadata
+
+Each node definition should expose:
+
+```text
+type
+name
+description
+category
+icon identifier
+version
+config schema
+input schema
+output schema
+```
+
+Do not put arbitrary executable frontend code in backend metadata.
+
+---
+
+# 101. Node Versioning
+
+Node behavior may change over time.
+
+Workflow version should record:
+
+```text
+node_type
+node_version
+```
+
+Do not silently run old workflows using incompatible future node semantics.
+
+Initial v1 may have:
+
+```text
+version = 1
+```
+
+for all nodes.
+
+---
+
+# 102. Node Migration
+
+Architecture should allow future node configuration migrations.
+
+Do not implement complex migration framework unless needed now.
+
+Document node versioning strategy.
+
+---
+
+# 103. Authentication
+
+Implement self-hosted admin authentication.
+
+Initial:
+
+```text
+email
+password
+```
+
+Passwords:
+
+```text
+Argon2id
+```
+
+No public registration by default.
+
+---
+
+# 104. First Run
+
+If no user:
+
+show setup.
+
+Fields:
+
+```text
+email
+password
+instance name
+```
+
+---
+
+# 105. Sessions
+
+Use secure cookie sessions:
+
+```text
+HttpOnly
+Secure in production
+SameSite
+expiration
+```
+
+Implement login/logout.
+
+---
+
+# 106. CSRF
+
+Protect cookie-based state-changing requests.
+
+---
+
+# 107. Projects
+
+Support project separation.
+
+Fields:
+
+```text
+id
+name
+slug
+description
+created_at
+updated_at
+```
+
+Workflows and credentials belong to projects.
+
+Do not cross project boundaries.
+
+---
+
+# 108. API Keys
+
+Optional management API keys.
+
+Format:
+
+```text
+fa_api_xxxxxxxxx
+```
+
+Store secure hashes only.
+
+Scopes:
+
+```text
+workflows:read
+workflows:write
+executions:read
+executions:run
+```
+
+---
+
+# 109. API Structure
+
+Base:
+
+```text
+/api/v1
+```
+
+Examples:
+
+```text
+GET    /projects
+POST   /projects
+
+GET    /workflows
+POST   /workflows
+GET    /workflows/{id}
+PATCH  /workflows/{id}
+
+POST   /workflows/{id}/validate
+POST   /workflows/{id}/publish
+POST   /workflows/{id}/run
+
+GET    /workflows/{id}/versions
+GET    /workflows/{id}/versions/{version}
+
+GET    /executions
+GET    /executions/{id}
+POST   /executions/{id}/cancel
+POST   /executions/{id}/retry
+
+GET    /credentials
+POST   /credentials
+PATCH  /credentials/{id}
+DELETE /credentials/{id}
+
+GET    /node-types
+
+GET    /workers
+GET    /stats
+```
+
+---
+
+# 110. Error Format
+
+Use consistent errors.
+
+Example:
+
+```json
+{
+  "error": {
+    "code": "WORKFLOW_VALIDATION_FAILED",
+    "message": "Workflow contains invalid nodes.",
+    "request_id": "req_xxx"
+  }
+}
+```
+
+---
+
+# 111. Request IDs
+
+Every API request gets:
+
+```text
+request_id
+```
+
+Include in:
+
+```text
+response headers
+errors
+structured logs
+```
+
+---
+
+# 112. PostgreSQL Tables
+
+Core tables:
+
+```text
+users
+sessions
+
+projects
+
+workflows
+workflow_versions
+
+credentials
+project_variables
+
+executions
+node_executions
+node_execution_attempts
+
+webhook_triggers
+schedule_triggers
+
+workers
+background_jobs
+
+execution_events
+audit_events
+idempotency_keys
+```
+
+---
+
+# 113. Indexes
+
+Important:
+
+```text
+executions(workflow_id, created_at DESC)
+executions(status, created_at)
+node_executions(execution_id)
+background_jobs(status, available_at)
+workers(last_seen_at)
+workflows(project_id, slug)
+```
+
+---
+
+# 114. PostgreSQL Source of Truth
+
+Durable workflow/execution state belongs in PostgreSQL.
+
+Redis restart must not delete:
+
+```text
+workflows
+workflow versions
+executions
+node results
+credentials
+```
+
+---
+
+# 115. Redis Responsibilities
+
+Redis for:
+
+```text
+job queue
+worker leases
+pub/sub
+rate limits
+distributed locks
+delayed jobs
+```
+
+---
+
+# 116. Job Queue
+
+Internal job types may include:
+
+```text
+start_execution
+execute_node
+resume_execution
+deliver_webhook
+scheduled_trigger
+maintenance
+```
+
+Keep focused.
+
+Do not rebuild full general-purpose PulseQueue unnecessarily.
+
+---
+
+# 117. Durable Queue Semantics
+
+Redis job may be lost during exceptional failures.
+
+PostgreSQL execution state must allow reconciliation.
+
+Consider durable job table + Redis dispatch or outbox pattern.
+
+Strongly prefer reliability over naive dual writes.
+
+---
+
+# 118. Outbox Pattern
+
+For important execution transitions:
+
+```text
+DB transaction
+  ↓
+execution/node state update
++
+outbox event
+  ↓
+commit
+  ↓
+dispatcher
+  ↓
+Redis
+```
+
+This prevents:
+
+```text
+DB updated but queue publish failed
+```
+
+in critical paths.
+
+---
+
+# 119. Outbox Table
+
+Fields:
+
+```text
+id
+event_type
+payload
+created_at
+available_at
+processed_at
+attempts
+last_error
+```
+
+Multiple dispatchers should safely process with:
+
+```text
+FOR UPDATE SKIP LOCKED
+```
+
+---
+
+# 120. Node Scheduling
+
+After node completion:
+
+1. Persist output.
+2. Mark completed.
+3. Determine downstream readiness.
+4. Persist ready state.
+5. Create outbox jobs.
+
+Do not queue next nodes before durable completion commit.
+
+---
+
+# 121. Parallel Branches
+
+Independent branches should execute concurrently.
+
+Example:
+
+```text
+Trigger
+ ├── HTTP A
+ └── HTTP B
+```
+
+Both may execute at same time.
+
+Do not serialize entire workflow unnecessarily.
+
+---
+
+# 122. Concurrency Limits
+
+Support:
+
+```text
+global worker concurrency
+per-workflow concurrency
+```
+
+Optional:
+
+```text
+per-project concurrency
+```
+
+Prevent one workflow from consuming every worker.
+
+---
+
+# 123. Workflow Concurrency Policy
+
+Config:
+
+```text
+allow_parallel
+queue
+reject
+```
+
+Example:
+
+A schedule fires while previous execution still running.
+
+Default may:
+
+```text
+allow_parallel
+```
+
+but allow user to choose.
+
+---
+
+# 124. Idempotency
+
+Webhook requests may include:
+
+```text
+Idempotency-Key
+```
+
+Allow optional deduplication.
+
+Do not automatically treat identical payloads as duplicates.
+
+---
+
+# 125. Scheduled Trigger Idempotency
+
+Use unique constraint:
+
+```text
+schedule_id + occurrence_time
+```
+
+or equivalent.
+
+Prevents duplicate scheduler runs.
+
+---
+
+# 126. Webhook Trigger Idempotency
+
+If external service supplies stable event ID:
+
+allow mapping it to:
+
+```text
+idempotency key
+```
+
+---
+
+# 127. Webhook Endpoint Enumeration
+
+Webhook IDs should be high entropy.
+
+Do not use sequential:
+
+```text
+/hooks/1
+/hooks/2
+```
+
+Use random tokens/UUIDs.
+
+---
+
+# 128. Webhook Rate Limiting
+
+Protect webhook endpoints with Redis rate limiting.
+
+Allow per-workflow configuration.
+
+Do not let one endpoint overload worker system.
+
+---
+
+# 129. Webhook Body Limits
+
+Configure:
+
+```text
+MAX_WEBHOOK_BODY_BYTES
+```
+
+Reject oversized input before allocating huge memory.
+
+---
+
+# 130. External HTTP Response Limits
+
+HTTP node:
+
+```text
+MAX_HTTP_RESPONSE_BYTES
+```
+
+If response exceeds limit:
+
+fail with:
+
+```text
+RESPONSE_TOO_LARGE
+```
+
+or optionally truncate where explicitly configured.
+
+---
+
+# 131. Redirect Security
+
+Every HTTP node redirect must pass SSRF validation.
+
+Do not validate initial URL only.
+
+---
+
+# 132. DNS Rebinding Protection
+
+Resolve and validate addresses.
+
+Document unavoidable limitations.
+
+Do not connect to private IP after validating only public hostname.
+
+---
+
+# 133. TLS
+
+Validate HTTPS certificates by default.
+
+Allow disabling verification only with explicit dangerous advanced setting.
+
+Do not default insecure.
+
+---
+
+# 134. User-Agent
+
+Use recognizable:
+
+```text
+FlowAPI/...
+```
+
+or configurable application user-agent.
+
+Do not impersonate browsers/services unnecessarily.
+
+---
+
+# 135. Logs
+
+Use structured application logs.
+
+Context:
+
+```text
+request_id
+execution_id
+workflow_id
+node_execution_id
+worker_id
+node_type
+attempt
+duration
+```
+
+Do not log credentials.
+
+---
+
+# 136. Metrics
+
+Prometheus-compatible optional metrics:
+
+```text
+flowapi_executions_total
+flowapi_executions_failed_total
+flowapi_node_executions_total
+flowapi_node_duration_seconds
+flowapi_queue_depth
+flowapi_workers_online
+flowapi_webhooks_received_total
+```
+
+---
+
+# 137. Health
+
+Provide:
+
+```text
+/health
+/ready
+```
+
+Readiness:
+
+```text
+PostgreSQL
+Redis
+```
+
+Workers separately expose heartbeat through system state.
+
+---
+
+# 138. Dashboard Main Navigation
+
+Use:
+
+```text
+Workflows
+Executions
+Credentials
+Variables
+Workers
+Settings
+```
+
+---
+
+# 139. Workflow List
+
+Columns:
+
+```text
+Workflow
+Status
+Trigger
+Last execution
+Success rate
+Updated
+```
+
+Use real metrics.
+
+---
+
+# 140. Workflow Editor Design
+
+The editor should feel professional.
+
+Layout:
+
+```text
+Node library | Canvas | Configuration panel
+```
+
+Top bar:
+
+```text
+Back
+Workflow name
+Save
+Validate
+Test
+Publish
+Enable/Disable
+```
+
+---
+
+# 141. Node Search
+
+Shortcut:
+
+```text
+/
+```
+
+or add-node modal.
+
+Search:
+
+```text
+HTTP
+Condition
+Postgres
+Discord
+Webhook
+```
+
+---
+
+# 142. Connection Validation
+
+Frontend can provide immediate UX validation.
+
+Backend remains authoritative.
+
+Do not rely only on frontend validation.
+
+---
+
+# 143. Auto Save
+
+Draft may auto-save with debounce.
+
+Avoid losing user work.
+
+Use optimistic concurrency or revision ID to prevent conflicting edits.
+
+---
+
+# 144. Draft Concurrency
+
+If two browser tabs edit same workflow:
+
+do not silently overwrite.
+
+Use:
+
+```text
+draft_revision
+```
+
+and reject stale update with:
+
+```text
+409 Conflict
+```
+
+---
+
+# 145. Undo / Redo
+
+Implement in editor state.
+
+Do not create workflow versions for every undo.
+
+Only published versions are immutable production history.
+
+---
+
+# 146. Execution Visualization
+
+Opening a running execution should display its graph.
+
+Each node displays status.
+
+Real-time SSE updates.
+
+Clicking node opens detail.
+
+---
+
+# 147. Executions Dashboard
+
+Filters:
+
+```text
+status
+workflow
+trigger
+date
+```
+
+Search by:
+
+```text
+execution ID
+workflow
+```
+
+---
+
+# 148. Credentials Dashboard
+
+Show:
+
+```text
+Name
+Type
+Used by workflows
+Updated
+```
+
+Never show secret values.
+
+---
+
+# 149. Credential Usage
+
+Before deleting credential:
+
+show workflows referencing it.
+
+Prevent deletion or require clear confirmation if active workflow depends on it.
+
+---
+
+# 150. Variables Dashboard
+
+Project variables:
+
+```text
+API_BASE_URL
+REGION
+ENV_NAME
+```
+
+Non-secret.
+
+Allow editing.
+
+Changes affect future executions.
+
+Execution should capture variable snapshot/version if necessary for debugging.
+
+---
+
+# 151. Configuration Snapshot
+
+Every execution should know:
+
+```text
+workflow version
+variable revision
+credential references
+```
+
+Never expose credential values.
+
+---
+
+# 152. Execution Reproducibility
+
+You cannot guarantee perfect reproduction because external systems change.
+
+But preserve:
+
+```text
+workflow version
+trigger data
+node configs
+variables
+```
+
+to make debugging possible.
+
+---
+
+# 153. Audit Events
+
+Record:
+
+```text
+workflow created
+workflow published
+workflow enabled
+workflow disabled
+workflow archived
+credential created
+credential changed
+credential deleted
+workflow rollback
+execution manually triggered
+execution cancelled
+```
+
+Never record credential values.
+
+---
+
+# 154. Retention Worker
+
+Clean:
+
+```text
+old successful executions
+old node data
+old execution events
+expired sessions
+old idempotency records
+old outbox records
+```
+
+Incrementally.
+
+---
+
+# 155. Execution Data Redaction
+
+Allow configuration of keys such as:
+
+```text
+password
+token
+authorization
+secret
+api_key
+cookie
+```
+
+Redact in stored execution inspection data where possible.
+
+Do not rely only on frontend masking.
+
+---
+
+# 156. JSON Size Safety
+
+All JSON fields must have bounded size.
+
+Particularly:
+
+```text
+webhook payload
+HTTP response
+node input
+node output
+workflow graph
+```
+
+---
+
+# 157. No Arbitrary Code Node in V1
+
+Do NOT implement:
+
+```text
+Run Python
+Run JavaScript
+Shell Command
+Execute Bash
+```
+
+in v1.
+
+These massively change security model.
+
+Focus on safe structured nodes.
+
+---
+
+# 158. Future Code Node
+
+Architecture may support sandboxed code nodes later.
+
+Do not fake security.
+
+If future docs mention it, label as roadmap.
+
+---
+
+# 159. No Shell Node
+
+Never expose host shell execution through workflows in v1.
+
+---
+
+# 160. Expression Security Tests
+
+Explicitly test attempts such as:
+
+```text
+__import__("os")
+constructor.constructor(...)
+process.env
+filesystem access
+```
+
+They must not execute.
+
+---
+
+# 161. Cross-Node References
+
+A node may reference completed upstream nodes.
+
+Reject references to:
+
+```text
+unrelated downstream node
+unknown node
+```
+
+where possible during validation.
+
+---
+
+# 162. Conditional References
+
+If referenced node may be skipped due to branch:
+
+expression engine should return controlled null/missing behavior.
+
+Do not crash executor unpredictably.
+
+---
+
+# 163. Data Lineage
+
+Node detail should show where its input values came from where practical.
+
+At minimum preserve upstream node outputs.
+
+Do not build a massive lineage engine.
+
+---
+
+# 164. Workflow Graph Limits
+
+Configure:
+
+```text
+MAX_WORKFLOW_NODES
+MAX_WORKFLOW_EDGES
+```
+
+Example:
+
+```text
+500 nodes
+1000 edges
+```
+
+Prevent pathological graphs.
+
+---
+
+# 165. Maximum Execution Steps
+
+Protect against loop expansions.
+
+Configure:
+
+```text
+MAX_EXECUTION_NODE_RUNS
+```
+
+If exceeded:
+
+fail with:
+
+```text
+EXECUTION_LIMIT_EXCEEDED
+```
+
+---
+
+# 166. Maximum Execution Duration
+
+Support workflow-level limit.
+
+Example:
+
+```text
+1 hour
+```
+
+Long delays can use waiting state, but overall configurable policy remains.
+
+---
+
+# 167. Scheduler Lag
+
+Expose:
+
+```text
+scheduler lag
+```
+
+in Workers/System page.
+
+---
+
+# 168. Queue Health
+
+Show:
+
+```text
+queued jobs
+oldest queued job
+active workers
+failed internal jobs
+```
+
+Use real metrics.
+
+---
+
+# 169. Worker UI
+
+Table:
+
+```text
+Worker
+Status
+Active jobs
+Processed
+Failures
+Last heartbeat
+Started
+```
+
+---
+
+# 170. Demo Mode
+
+Provide:
+
+```bash
+make demo
+```
+
+Create explicit demo workflows.
+
+Examples:
+
+### Workflow 1
+
+```text
+Manual
+ ↓
+HTTP
+ ↓
+Condition
+ ↓
+Set
+```
+
+### Workflow 2
+
+```text
+Webhook
+ ↓
+Condition
+ ├── success → Discord-compatible demo webhook
+ └── error → Stop
+```
+
+### Workflow 3
+
+```text
+Schedule
+ ↓
+HTTP
+ ↓
+Transform
+```
+
+Do not insert fake execution history directly.
+
+Executions should run through real engine.
+
+---
+
+# 171. Local Demo Services
+
+Create local fixture APIs.
+
+Example service:
+
+```text
+GET /users/1
+POST /orders
+GET /unstable
+GET /slow
+```
+
+Useful for deterministic tests.
+
+---
+
+# 172. Unit Tests
+
+Test:
+
+```text
+DAG validation
+cycle detection
+node registry
+expression parser
+expression evaluator
+condition operators
+workflow version immutability
+retry delay
+execution transitions
+join readiness
+branch skipping
+credential redaction
+SSRF validation
+```
+
+---
+
+# 173. Expression Tests
+
+Examples:
+
+```text
+{{$trigger.body.email}}
+{{$nodes.http.body.id}}
+{{$variables.API_BASE_URL}}
+```
+
+Also test:
+
+```text
+missing properties
+invalid syntax
+forbidden execution attempts
+```
+
+---
+
+# 174. Scheduler Tests
+
+Test:
+
+```text
+cron parsing
+next occurrence
+timezone
+duplicate scheduling
+multiple scheduler instances
+```
+
+---
+
+# 175. Integration Tests
+
+Test:
+
+```text
+manual trigger
+webhook trigger
+schedule trigger
+HTTP node
+condition branch
+set node
+Postgres node
+outbox dispatch
+worker recovery
+retry
+delay/resume
+```
+
+---
+
+# 176. Failure Tests
+
+Test:
+
+```text
+Redis unavailable
+PostgreSQL unavailable
+worker crash
+HTTP timeout
+HTTP 500
+HTTP 429
+invalid expression
+missing credential
+credential revoked/deleted
+invalid SQL
+external Postgres timeout
+oversized webhook body
+oversized HTTP response
+```
+
+---
+
+# 177. SSRF Tests
+
+At minimum:
+
+```text
+127.0.0.1
+localhost
+10.0.0.1
+172.16.0.1
+192.168.1.1
+169.254.169.254
+::1
+fc00::1
+public hostname → private IP
+public URL → redirect private IP
+file:// URL
+```
+
+---
+
+# 178. E2E Tests
+
+Minimum:
+
+1. Login.
+2. Create project.
+3. Create workflow.
+4. Add Manual Trigger.
+5. Add HTTP Request node.
+6. Connect nodes.
+7. Configure HTTP node.
+8. Validate.
+9. Publish.
+10. Run.
+11. Execution enters queue.
+12. Worker processes nodes.
+13. Real output appears.
+14. Add Condition.
+15. Create branches.
+16. Publish new version.
+17. Run.
+18. Correct branch executes.
+19. Non-selected branch becomes skipped.
+20. Open execution detail.
+21. Input/output is correct.
+22. Trigger failure.
+23. Retry works.
+24. Create webhook workflow.
+25. Send webhook.
+26. Execution runs.
+27. Create schedule workflow.
+28. Scheduler triggers it.
+29. Kill worker during execution.
+30. Stale execution recovers/fails predictably.
+31. Previous execution history remains intact.
+
+---
+
+# 179. Cross-Version E2E
+
+Critical:
+
+1. Publish workflow v1.
+2. Start execution using v1.
+3. Edit draft to v2 while execution is running.
+4. Publish v2.
+5. Existing execution MUST continue using v1.
+6. New execution uses v2.
+
+---
+
+# 180. Credential E2E
+
+1. Create secret credential.
+2. Use it in HTTP node.
+3. Execute.
+4. Verify secret is used.
+5. Verify secret is NOT visible in:
+
+   * API response
+   * execution logs
+   * node output
+   * audit log
+   * dashboard
+6. Edit credential.
+7. Future execution uses new credential.
+
+---
+
+# 181. Docker Compose
+
+Fresh clone:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Services:
+
+```text
+postgres
+redis
+api
+dashboard
+worker
+scheduler
+dispatcher
+```
+
+If dispatcher/scheduler can safely share process, simplify.
+
+Do not create services merely for visual complexity.
+
+---
+
+# 182. Makefile
+
+Provide:
+
+```bash
+make dev
+make up
+make down
+make build
+make migrate
+make migration
+make test
+make lint
+make format
+make demo
+make clean
+```
+
+All commands must work.
+
+---
+
+# 183. Environment Variables
+
+`.env.example` should include:
+
+```text
+DATABASE_URL=
+REDIS_URL=
+
+FLOWAPI_SECRET_KEY=
+FLOWAPI_ENCRYPTION_KEY=
+
+API_HOST=
+API_PORT=
+DASHBOARD_URL=
+
+WORKER_CONCURRENCY=
+WORKER_HEARTBEAT_INTERVAL=
+WORKER_STALE_AFTER=
+
+SCHEDULER_POLL_INTERVAL=
+OUTBOX_POLL_INTERVAL=
+
+MAX_WEBHOOK_BODY_BYTES=
+MAX_HTTP_RESPONSE_BYTES=
+MAX_NODE_OUTPUT_BYTES=
+
+MAX_WORKFLOW_NODES=
+MAX_EXECUTION_NODE_RUNS=
+MAX_LOOP_ITEMS=
+
+SSRF_ALLOW_PRIVATE_NETWORKS=false
+
+EXECUTION_RETENTION_DAYS=
+```
+
+Validate startup configuration.
+
+---
+
+# 184. Alembic
+
+Use Alembic migrations.
+
+Never use ORM auto-create as production migration strategy.
+
+---
+
+# 185. GitHub Actions
+
+CI:
+
+```text
+backend lint
+backend typecheck
+backend tests
+
+frontend lint
+frontend tests
+frontend build
+
+expression security tests
+integration tests
+```
+
+Run PostgreSQL and Redis service containers where necessary.
+
+---
+
+# 186. README
+
+Create excellent README.
+
+Include:
+
+```text
+FlowAPI
+Visual workflow automation for developers.
+
+Why FlowAPI
+Features
+Screenshots
+Architecture
+Quick Start
+Build Your First Workflow
+Webhook Triggers
+Schedules
+Expressions
+Credentials
+Execution Model
+Retries
+Workflow Versioning
+Security
+Self Hosting
+Development
+Roadmap
+Contributing
+License
+```
+
+Do not fill with buzzwords.
+
+---
+
+# 187. Architecture Diagram
+
+Create Mermaid.
+
+Conceptually:
+
+```text
+                 ┌─────────────────┐
+                 │    Dashboard    │
+                 └────────┬────────┘
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │   FastAPI API   │
+                 └───┬─────────┬───┘
+                     │         │
+                     ▼         ▼
+               PostgreSQL    Redis
+                     │         │
+                     │         ▼
+                     │      Workers
+                     │         │
+                     │    Node Executors
+                     │
+                     ▼
+                 Outbox
+                     │
+                     ▼
+                 Dispatcher
+```
+
+Triggers:
+
+```text
+Webhook ─┐
+Manual  ─┼→ Execution
+Schedule ─┘
+```
+
+---
+
+# 188. Documentation
+
+Create:
+
+```text
+docs/
+├── architecture.md
+├── workflow-model.md
+├── execution-engine.md
+├── workflow-versioning.md
+├── expressions.md
+├── node-development.md
+├── triggers.md
+├── retries.md
+├── credentials.md
+├── ssrf-security.md
+├── scheduling.md
+├── deployment.md
+├── troubleshooting.md
+└── development.md
+```
+
+---
+
+# 189. Security Documentation
+
+Explicitly explain:
+
+```text
+no arbitrary code nodes
+credential encryption
+expression sandbox
+SSRF protection
+webhook authentication
+request size limits
+external database risks
+execution data sensitivity
+project isolation
+```
+
+Do not claim complete hostile multi-tenant sandboxing.
+
+---
+
+# 190. Dashboard Design Direction
+
+The dashboard/editor should feel like a modern infrastructure/developer tool.
+
+Conceptual inspiration:
+
+```text
+Linear
+Vercel
+Railway
+n8n
+Retool
+```
+
+Do not copy.
+
+Avoid:
+
+```text
+glassmorphism everywhere
+giant gradient backgrounds
+huge cards
+excessive roundness
+over-animated connectors
+fake futuristic AI styling
+```
+
+The visual editor should prioritize clarity.
+
+---
+
+# 191. Dark Mode
+
+Support:
+
+```text
+system
+light
+dark
+```
+
+Persist user preference.
+
+---
+
+# 192. Editor Performance
+
+Large workflows should not become unusable.
+
+Avoid rerendering entire canvas on every keystroke.
+
+Use React Flow state carefully.
+
+---
+
+# 193. No Fake Functionality
+
+Never create:
+
+```text
+fake executions
+fake node output
+fake logs
+fake webhook deliveries
+fake worker status
+fake schedule runs
+fake success rates
+```
+
+Production dashboard must use real backend APIs.
+
+---
+
+# 194. No Hardcoded Production Data
+
+Hardcoded fixtures only in:
+
+```text
+tests
+Storybook
+explicit demo fixtures
+```
+
+---
+
+# 195. Avoid Overengineering
+
+Do NOT add:
+
+```text
+Kafka
+Kubernetes
+Temporal server
+service mesh
+distributed consensus
+arbitrary code sandboxes
+Elasticsearch
+```
+
+for v1.
+
+PostgreSQL + Redis + workers is sufficient.
+
+---
+
+# 196. Implementation Phases
+
+Implement sequentially.
+
+## Phase 1 — Foundation
+
+* monorepo
+* FastAPI
+* Next.js
+* PostgreSQL
+* Redis
+* Docker
+* config
+* quality tooling
+
+## Phase 2 — Authentication & Projects
+
+* admin
+* sessions
+* projects
+
+## Phase 3 — Workflow Domain
+
+* workflows
+* drafts
+* immutable versions
+* graph schemas
+
+## Phase 4 — Node Registry
+
+* node contracts
+* metadata
+* config validation
+
+## Phase 5 — Workflow Validation
+
+* DAG
+* cycle detection
+* references
+* config validation
+
+## Phase 6 — Expression Engine
+
+* parser
+* evaluator
+* interpolation
+* security
+
+## Phase 7 — Execution Domain
+
+* executions
+* node executions
+* state machines
+
+## Phase 8 — Queue / Outbox
+
+* internal jobs
+* dispatcher
+* worker leases
+* recovery
+
+## Phase 9 — Manual Trigger
+
+* test/run
+* execution creation
+
+## Phase 10 — Core Nodes
+
+* Set
+* Condition
+* Stop
+* Merge
+
+## Phase 11 — HTTP Node
+
+* requests
+* credentials
+* SSRF
+* retries
+
+## Phase 12 — Webhook Trigger
+
+* endpoint
+* authentication
+* body limits
+* idempotency
+
+## Phase 13 — Schedule Trigger
+
+* cron
+* timezone
+* scheduler
+* duplicate safety
+
+## Phase 14 — Branching / Parallelism
+
+* ready nodes
+* skip semantics
+* joins
+
+## Phase 15 — Loop / Delay
+
+* bounded iteration
+* durable waiting
+
+## Phase 16 — PostgreSQL Node
+
+* credentials
+* parameterized SQL
+* timeouts
+
+## Phase 17 — Notification Nodes
+
+* Discord
+* generic webhook
+
+## Phase 18 — Credentials / Variables
+
+* encryption
+* masking
+* revisions
+
+## Phase 19 — Workflow Editor
+
+* React Flow
+* node library
+* config panel
+* expressions
+
+## Phase 20 — Execution UI
+
+* execution graph
+* timeline
+* input/output
+* retries
+
+## Phase 21 — Live Updates
+
+* SSE
+* execution events
+
+## Phase 22 — Workflow History
+
+* versions
+* graph diff
+* rollback
+
+## Phase 23 — Reliability
+
+* worker crash recovery
+* scheduler health
+* queue health
+* reconciliation
+
+## Phase 24 — Retention
+
+* execution cleanup
+* node data cleanup
+* audit/idempotency cleanup
+
+## Phase 25 — Tests
+
+* unit
+* security
+* integration
+* E2E
+
+## Phase 26 — Documentation
+
+* README
+* architecture
+* execution semantics
+* security
+
+## Phase 27 — GitHub Polish
+
+* CI
+* demo workflows
+* screenshots
+* contributor docs
+
+---
+
+# 197. Definition of Done
+
+FlowAPI is NOT complete until all of the following work:
+
+1. Fresh clone.
+
+2. Run:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+3. PostgreSQL starts.
+
+4. Redis starts.
+
+5. API starts.
+
+6. Worker starts.
+
+7. Scheduler starts.
+
+8. Dashboard starts.
+
+9. Administrator setup works.
+
+10. Login works.
+
+11. Create project.
+
+12. Create workflow.
+
+13. Add Manual Trigger.
+
+14. Add Set node.
+
+15. Connect nodes.
+
+16. Validate workflow.
+
+17. Publish v1.
+
+18. Run workflow.
+
+19. Real execution is created.
+
+20. Worker executes real nodes.
+
+21. Outputs persist.
+
+22. Execution becomes completed.
+
+23. Add HTTP node.
+
+24. HTTP request executes through worker.
+
+25. SSRF private target is blocked.
+
+26. Redirect to private target is blocked.
+
+27. Add Condition node.
+
+28. True/false branch executes correctly.
+
+29. Non-selected branch is skipped.
+
+30. Expressions resolve real previous node output.
+
+31. Unsafe arbitrary code expression fails.
+
+32. Create credential.
+
+33. Secret is encrypted.
+
+34. Secret works in HTTP node.
+
+35. Secret does not appear in logs/API/output.
+
+36. Create webhook workflow.
+
+37. Send real webhook.
+
+38. Workflow runs.
+
+39. Webhook auth works.
+
+40. Oversized webhook is rejected.
+
+41. Create schedule workflow.
+
+42. Cron trigger executes.
+
+43. Duplicate scheduler execution is prevented.
+
+44. Retry transient node failure.
+
+45. Retry history is visible.
+
+46. Permanent failure stops execution appropriately.
+
+47. Error branch works.
+
+48. Parallel branches work.
+
+49. Merge waits correctly.
+
+50. Loop executes bounded collection.
+
+51. Excessive loop is rejected.
+
+52. Delay node waits durably.
+
+53. Restart worker during waiting execution.
+
+54. Execution resumes correctly.
+
+55. Kill worker during node execution.
+
+56. Node does not stay permanently running.
+
+57. Redis restart does not erase workflow/execution history.
+
+58. Edit workflow during running execution.
+
+59. Running execution stays on old immutable version.
+
+60. New execution uses new version.
+
+61. Workflow version history works.
+
+62. Rollback works.
+
+63. Execution detail shows actual graph state.
+
+64. Node detail shows real input/output.
+
+65. Live execution updates work.
+
+66. Retry creates new history correctly.
+
+67. Credentials page works.
+
+68. Variables work.
+
+69. Audit events are real.
+
+70. Retention does not delete active execution.
+
+71. Backend tests pass.
+
+72. Expression security tests pass.
+
+73. SSRF tests pass.
+
+74. Integration tests pass.
+
+75. Frontend tests pass.
+
+76. Type checking passes.
+
+77. Lint passes.
+
+78. Dashboard build succeeds.
+
+79. E2E workflow passes.
+
+80. README fresh-install instructions match reality.
+
+---
+
+# 198. Critical Engineering Rules
+
+Never:
+
+* run workflows inside FastAPI routes
+* use Python `eval()`
+* use `exec()`
+* execute arbitrary JavaScript
+* expose shell execution
+* expose host environment variables to workflows
+* store credentials in plaintext
+* expose credential values in workflow JSON
+* trust outbound HTTP URLs
+* skip SSRF validation on redirects
+* mutate published workflow versions
+* let running executions use newly edited graph
+* use Redis as durable workflow history
+* leave node executions permanently running
+* retry permanent errors blindly
+* queue downstream nodes before parent completion is durable
+* make webhook endpoints sequential/easy to enumerate
+* store unbounded payloads
+* execute unbounded loops
+* block workers with long sleeps
+* fake execution output
+* fake node status
+* fake live logs
+* create non-functional editor nodes
+* introduce arbitrary code nodes in v1
+
+---
+
+# 199. Engineering Philosophy
+
+Prioritize:
+
+1. execution correctness
+2. durable workflow state
+3. immutable versioning
+4. safe expression evaluation
+5. credential security
+6. SSRF protection
+7. crash recovery
+8. predictable branching
+9. developer experience
+10. UI quality
+
+The visual editor is NOT the most important component.
+
+A beautiful React Flow canvas with an unreliable execution engine is a failed project.
+
+---
+
+# 200. Final Goal
+
+An experienced engineer opening FlowAPI should think:
+
+> "This developer understands workflow engines, DAG execution, distributed workers, durable state, retries, branching, expression evaluation, secrets, webhooks, scheduling, Redis, PostgreSQL, FastAPI, React Flow, Next.js, security, and production reliability."
+
+FlowAPI should be a genuine workflow automation engine.
+
+It must execute actual workflows reliably, preserve immutable workflow versions, survive worker failures, securely handle credentials, and clearly explain every execution.
+
+Do not build only a drag-and-drop workflow mockup.
+
+Build the execution engine first and make the editor a real interface to that engine.
+
+---
+
+# FINAL EXECUTION INSTRUCTION
+
+Begin by inspecting the current repository.
+
+If empty:
+
+1. initialize the monorepo
+2. implement Phase 1
+3. continue sequentially through the phases
+
+If code exists:
+
+1. inspect all relevant files
+2. preserve technically correct work
+3. compare implementation against this specification
+4. identify the earliest incomplete phase
+5. continue from there
+
+Do not only create a plan.
+
+Do not stop after scaffolding.
+
+Do not create fake workflow execution.
+
+Actively implement the real system.
+
+Throughout development run:
+
+* Alembic migrations
+* backend unit tests
+* workflow graph tests
+* expression security tests
+* SSRF tests
+* worker/recovery tests
+* integration tests
+* frontend tests
+* Ruff
+* mypy
+* ESLint
+* TypeScript checks
+* Next.js production build
+* Docker Compose validation
+* E2E workflow tests
+
+Before implementing every execution transition ask:
+
+```text
+What happens if this worker crashes immediately
+after this operation?
+```
+
+Before implementing every expression feature ask:
+
+```text
+Can this be abused to execute arbitrary code,
+access the host, or retrieve secrets?
+```
+
+Before implementing every outbound request ask:
+
+```text
+Can this URL, DNS resolution, or redirect
+reach a private/internal service?
+```
+
+The project is complete only when the Definition of Done is genuinely satisfied.
+
+Build FlowAPI as a serious open-source workflow automation platform.
